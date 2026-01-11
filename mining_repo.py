@@ -9,9 +9,11 @@ from dotenv import load_dotenv
 # --- CONFIGURACIÓN DE INVESTIGACIÓN ---
 # Busca repositorios educativos o de referencia, no proyectos aleatorios que "quizás" usen patrones.
 SEARCH_QUERIES = [
-    "topic:design-patterns language:TypeScript",
-    "topic:gang-of-four language:TypeScript",
-    "topic:software-architecture language:TypeScript"
+    "language:TypeScript stars:>1000",       # Proyectos generales muy populares
+    "language:TypeScript stars:500..1000",   # Proyectos generales media-alta popularidad
+    "topic:clean-architecture language:TypeScript", # Arquitecturas que fuerzan patrones
+    "topic:nestjs language:TypeScript",      # Framework que usa patrones intensivamente
+    "topic:design-patterns language:TypeScript" # Tu query original (Backup)
 ]
 
 # Patrones GoF a buscar (Nombres de carpetas esperados)
@@ -23,8 +25,8 @@ PATTERNS_TO_MINE = [
 ]
 
 # Filtros de Calidad (Para asegurar un Ground Truth robusto)
-MIN_STARS = 15          # Evita repositorios vacíos o tareas escolares sin validar
-MAX_REPOS_TO_SCAN = 100  # Ajusta esto según tu ancho de banda (ej. 100)
+MIN_STARS = 10          # Evita repositorios vacíos o tareas escolares sin validar
+MAX_REPOS_TO_SCAN = 1000  # Ajusta esto según tu ancho de banda (ej. 100)
 OUTPUT_DIR = "dataset_ground_truth"
 TEMP_DIR = "temp_clones"
 
@@ -43,6 +45,40 @@ def setup_environment():
     # Crear subcarpetas para cada patrón
     for pattern in PATTERNS_TO_MINE:
         os.makedirs(os.path.join(OUTPUT_DIR, pattern), exist_ok=True)
+
+def is_valid_source_code(file_path):
+    filename_lower = os.path.basename(file_path).lower()
+
+    if "test" in filename_lower or "spec" in filename_lower:
+        return False
+    
+    # [AGREGADO - ROBUSTEZ]
+    # Razón: Al minar repos generales (no educativos), encontraremos bundles o archivos generados.
+    # El paper analiza "source code", no código de máquina/minificado.
+    try:
+        # Filtro de tamaño (>1MB)
+        if os.path.getsize(file_path) > 1_000_000: 
+            return False
+
+        with open(file_path, 'r', encoding = 'utf-8', errors='ignore') as f:
+            # Leemos líneas para detectar minificación
+            lines = f.readlines()
+            if not lines: return False
+            
+            # Si una línea es larguísima (>1000 chars), suele ser código generado/minificado
+            if max(len(line) for line in lines) > 1000:
+                return False
+                
+            content = "".join(lines)
+            
+        structural_keywords = ['class ', 'interface ', 'abstract class ', 'implements ', 'extends ']
+
+        if not any(keyword in content for keyword in structural_keywords):
+            return False
+            
+        return True
+    except Exception:
+        return False
 
 def analyze_and_extract(repo_name, local_path, metadata_list):
     """
@@ -65,22 +101,22 @@ def analyze_and_extract(repo_name, local_path, metadata_list):
                     if file.endswith(".ts") and not file.endswith(".d.ts"):
                         # Construir rutas
                         src_file = os.path.join(root, file)
-                        
-                        # Renombramos para evitar colisiones: RepoName_OriginalName.ts
-                        safe_repo_name = repo_name.replace("/", "_")
-                        new_filename = f"{safe_repo_name}__{file}"
-                        dest_file = os.path.join(OUTPUT_DIR, pattern, new_filename)
-                        
-                        # Copiar archivo
-                        shutil.copy2(src_file, dest_file)
-                        
-                        # Guardar metadatos para el Paper (Validación)
-                        metadata_list.append({
-                            "pattern": pattern,
-                            "original_repo": repo_name,
-                            "original_path": src_file.replace(TEMP_DIR, ""),
-                            "local_filename": new_filename
-                        })
+                        if is_valid_source_code(src_file): 
+                            # Renombramos para evitar colisiones: RepoName_OriginalName.ts
+                            safe_repo_name = repo_name.replace("/", "_")
+                            new_filename = f"{safe_repo_name}__{file}"
+                            dest_file = os.path.join(OUTPUT_DIR, pattern, new_filename)
+                            
+                            # Copiar archivo
+                            shutil.copy2(src_file, dest_file)
+                            
+                            # Guardar metadatos para el Paper (Validación)
+                            metadata_list.append({
+                                "pattern": pattern,
+                                "original_repo": repo_name,
+                                "original_path": src_file.replace(TEMP_DIR, ""),
+                                "local_filename": new_filename
+                            })
 
 def main():
     # 1. Cargar Token (Crear archivo .env o ponerlo directo aquí para pruebas rápidas)
