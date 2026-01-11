@@ -8,8 +8,11 @@ wheels/
 .vscode
 
 dataset_ground_truth
+dataset_ground_truth_1
+dataset_ground_truth_v2
 repos
 temp_clones
+temp_clones_curated
 embeddings_dataset.json
 Mineros.zip
 

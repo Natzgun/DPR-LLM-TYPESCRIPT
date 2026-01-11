@@ -5,7 +5,7 @@ import ollama
 from tqdm import tqdm
 
 # --- CONFIGURACIÓN ---
-DATASET_DIR = "dataset_ground_truth"
+DATASET_DIR = "dataset_ground_truth_v2"
 OUTPUT_FILE = "embeddings_dataset.json"
 
 # Nombres exactos (Asegúrate que coincidan con 'ollama list')

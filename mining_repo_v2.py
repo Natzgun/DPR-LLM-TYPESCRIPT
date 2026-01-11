@@ -56,7 +56,7 @@ SEARCH_QUERIES = [
 
 # Configuración de filtrado
 MIN_STARS = 10
-MAX_REPOS_TO_SCAN = 200
+MAX_REPOS_TO_SCAN = 1000
 OUTPUT_DIR = "dataset_ground_truth_v2"
 TEMP_DIR = "temp_clones"
 

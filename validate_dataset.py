@@ -38,7 +38,7 @@ except ImportError:
 # CONFIGURACIÓN
 # ============================================================================
 
-DATASET_DIR = "dataset_ground_truth"
+DATASET_DIR = "dataset_ground_truth_v2"
 REPORT_FILE = "dataset_quality_report.json"
 
 PATTERNS = [
