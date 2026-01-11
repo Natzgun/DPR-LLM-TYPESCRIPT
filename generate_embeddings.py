@@ -2,166 +2,156 @@ import os
 import json
 import re
 import ollama
+import numpy as np
 from tqdm import tqdm
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN PARA RÉPLICA CIENTÍFICA ---
 DATASET_DIR = "dataset_ground_truth_v2"
-OUTPUT_FILE = "embeddings_dataset.json"
+OUTPUT_FILE = "embeddings_typescript_replica.json"
 
-# Nombres exactos (Asegúrate que coincidan con 'ollama list')
+# LISTA DE MODELOS PARA COMPARAR ARQUITECTURAS
+# Incluimos Encoders (tipo RoBERTa) y Decoders (tipo CodeGPT) para imitar el paper.
 MODELS = [
-    "nomic-embed-text:latest",  # Agregamos :latest por seguridad
-    "qwen2.5-coder:7b",         # Agregamos :7b porque así lo tienes instalado
-    "llama3.2:latest"           # Agregamos :latest
+    # 1. El equivalente a RoBERTa (Ganador del Paper)
+    "nomic-embed-text:latest", 
+    
+    # 2. El equivalente a CodeBERT (Encoder específico de código)
+    # Si no tienes bge-m3, usa "all-minilm" o similar.
+    "bge-m3:latest", 
+
+    # 3. El equivalente a CodeGPT (Decoder / Generativo)
+    # Estos son los que te dije que quitaras, pero DEBES usarlos para la réplica.
+    "qwen2.5-coder:7b",       
+    "deepseek-coder:6.7b"
 ]
 
-# Límite de caracteres seguro para evitar error 500 (aprox 2000-3000 tokens)
-MAX_CHARS = 12000 
+# Configuración de Ventana Deslizante (Vital para archivos grandes como menciona el paper)
+CHUNK_SIZE_CHARS = 4000  # Reducido un poco para asegurar que Qwen/Deepseek no exploten
+OVERLAP_CHARS = 200      
+
+def get_sliding_window_embedding(model_name, text):
+    """
+    Genera embeddings usando ventana deslizante y promedio.
+    Soporta tanto modelos de Embedding puros como modelos de Chat (Qwen/Deepseek).
+    """
+    # Dividir en chunks
+    chunks = []
+    start = 0
+    
+    # Seguridad: Si el texto es vacío
+    if not text.strip(): return []
+
+    # Si es pequeño, un solo chunk
+    if len(text) <= CHUNK_SIZE_CHARS:
+        chunks.append(text)
+    else:
+        # Loop de ventana deslizante
+        while start < len(text):
+            end = min(start + CHUNK_SIZE_CHARS, len(text))
+            chunk = text[start:end]
+            chunks.append(chunk)
+            if end == len(text):
+                break
+            start += CHUNK_SIZE_CHARS - OVERLAP_CHARS
+    
+    vectors = []
+    for chunk in chunks:
+        try:
+            # Ollama permite pedir embeddings a modelos de chat (qwen/deepseek)
+            # El endpoint es el mismo.
+            resp = ollama.embeddings(model=model_name, prompt=chunk)
+            emb = resp.get("embedding")
+            
+            if emb:
+                vectors.append(emb)
+            else:
+                # A veces los modelos de chat devuelven vacío si el prompt es raro
+                print(f"   ⚠️ Vector vacío recibido de {model_name}")
+                
+        except Exception as e:
+            print(f"   ⚠️ Error en chunk con {model_name}: {e}")
+
+    if not vectors:
+        return []
+    
+    # Promedio de los vectores (Mean Pooling) para tener 1 solo vector por archivo
+    return np.mean(vectors, axis=0).tolist()
 
 def clean_typescript_code(code):
-    """
-    Limpieza y Truncado para evitar errores de contexto.
-    """
-    # 1. Eliminar comentarios de bloque
-    code = re.sub(r'/\*.*?\*/', '', code, flags=re.DOTALL)
-    # 2. Eliminar comentarios de línea
-    code = re.sub(r'//.*', '', code)
-    # 3. Eliminar imports (a veces meten ruido, opcional, aquí los dejamos por ahora)
-    
-    # 4. Colapsar espacios
+    # Limpieza estándar (sin ser destructiva)
+    code = re.sub(r'/\*.*?\*/', '', code, flags=re.DOTALL) # Quitar bloques
+    code = re.sub(r'//.*', '', code) # Quitar lineas
     lines = [line.strip() for line in code.split('\n') if line.strip()]
-    cleaned = ' '.join(lines)
-    
-    # 5. TRUNCADO DE SEGURIDAD (La solución al error 500)
-    if len(cleaned) > MAX_CHARS:
-        return cleaned[:MAX_CHARS]
-    
-    return cleaned
-
-def check_models_availability():
-    """Verifica qué modelos tienes instalados en Ollama"""
-    try:
-        models_info = ollama.list()
-        # ollama.list() devuelve objetos, extraemos los nombres
-        available_names = [m['name'] for m in models_info['models']]
-        print(f"🤖 Modelos disponibles en tu Ollama: {available_names}")
-        
-        missing = []
-        for m in MODELS:
-            # Buscamos coincidencia parcial (ej: qwen2.5-coder:latest coincide con qwen2.5-coder)
-            if not any(m in avail for avail in available_names):
-                missing.append(m)
-        
-        if missing:
-            print(f"❌ ALERTA: Parece que te faltan estos modelos o tienen otro tag: {missing}")
-            print("   Por favor ejecuta 'ollama list' y actualiza la lista MODELS en el script.")
-            return False
-        return True
-    except Exception as e:
-        print(f"⚠️ No pude verificar los modelos automáticamente: {e}")
-        return True # Intentamos continuar de todas formas
-
-def get_files_from_dataset(base_dir):
-    file_list = []
-    if not os.path.exists(base_dir):
-        print(f"❌ Error: No encuentro la carpeta '{base_dir}'")
-        return []
-
-    for pattern_name in os.listdir(base_dir):
-        pattern_path = os.path.join(base_dir, pattern_name)
-        if os.path.isdir(pattern_path):
-            for filename in os.listdir(pattern_path):
-                if filename.endswith(".ts"):
-                    file_list.append({
-                        "path": os.path.join(pattern_path, filename),
-                        "pattern": pattern_name,
-                        "filename": filename
-                    })
-    return file_list
+    return '\n'.join(lines)
 
 def main():
-    # 1. Verificación previa
-    if not check_models_availability():
-        input("Presiona ENTER para intentar continuar de todas formas o Ctrl+C para cancelar...")
-
-    files = get_files_from_dataset(DATASET_DIR)
-    print(f"📂 Archivos encontrados: {len(files)}")
+    print("--- REPLICACIÓN PANDEY ET AL. (2025) - STEP 1: EMBEDDINGS ---")
     
-    results = {}
-    
-    # Variable para mostrar un ejemplo al usuario
-    example_shown = False
+    # Verificar modelos antes de empezar
+    try:
+        installed = [m['name'] for m in ollama.list()['models']]
+        print(f"Modelos instalados: {installed}")
+        for m in MODELS:
+            # Verificación laxa (ignora tags version)
+            base_name = m.split(':')[0]
+            if not any(base_name in ins for ins in installed):
+                print(f"❌ ADVERTENCIA: No veo '{m}' instalado. Ejecuta: ollama pull {m}")
+    except:
+        pass
 
-    # 2. Cargar y Limpiar
-    print("🧹 Limpiando código fuente...")
-    for f in files:
+    files = []
+    # (Aquí iría tu función get_files_from_dataset que ya tienes)
+    # Simulación rápida para que el script funcione si copias y pegas:
+    if os.path.exists(DATASET_DIR):
+        for root, dirs, filenames in os.walk(DATASET_DIR):
+            for filename in filenames:
+                if filename.endswith(".ts") or filename.endswith(".tsx"):
+                    files.append({
+                        "path": os.path.join(root, filename),
+                        "filename": filename,
+                        # Asumiendo estructura carpeta/Label/archivo.ts
+                        "label": os.path.basename(root) 
+                    })
+    
+    print(f"📂 Archivos a procesar: {len(files)}")
+    
+    final_data = []
+
+    # Iterar por archivo (mejor que por modelo, para no leer el disco mil veces)
+    for f in tqdm(files, desc="Procesando Archivos"):
         try:
-            with open(f["path"], "r", encoding="utf-8", errors="ignore") as file_read:
-                content = file_read.read()
-                cleaned_content = clean_typescript_code(content)
-                
-                # --- DEMOSTRACIÓN PARA EL USUARIO ---
-                if not example_shown:
-                    print("\n--- [VISTA PREVIA DE LIMPIEZA] ---")
-                    print(f"Archivo: {f['filename']}")
-                    print(f"Original: {len(content)} chars -> Limpio: {len(cleaned_content)} chars")
-                    print(f"Fragmento: {cleaned_content[:200]}...")
-                    print("----------------------------------\n")
-                    example_shown = True
-                # ------------------------------------
+            with open(f["path"], "r", encoding="utf-8", errors="ignore") as fr:
+                content = fr.read()
+            
+            cleaned = clean_typescript_code(content)
+            if not cleaned: continue
 
-                results[f["path"]] = {
-                    "filename": f["filename"],
-                    "label": f["pattern"],
-                    "embeddings": {} 
-                }
-                f["cleaned_content"] = cleaned_content
+            file_entry = {
+                "filename": f["filename"],
+                "label": f["label"],
+                "vectors": {}
+            }
+
+            # Generar vector con CADA modelo para este archivo
+            for model_name in MODELS:
+                vec = get_sliding_window_embedding(model_name, cleaned)
+                if vec:
+                    # Guardamos el vector bajo el nombre del modelo
+                    file_entry["vectors"][model_name] = vec
+            
+            # Solo guardamos si se generó al menos un vector
+            if file_entry["vectors"]:
+                final_data.append(file_entry)
+
         except Exception as e:
-            print(f"⚠️ Error leyendo {f['path']}: {e}")
+            print(f"Error archivo {f['filename']}: {e}")
 
-    # 3. Generar Embeddings
-    for model_name in MODELS:
-        print(f"\n🧠 Procesando con modelo: {model_name}")
-        
-        # Usamos try/except dentro del loop para que un archivo malo no mate todo el proceso
-        for f in tqdm(files, desc=f"Vectores ({model_name})"):
-            if "cleaned_content" not in f or not f["cleaned_content"]:
-                continue
-                
-            try:
-                # Intentamos generar el embedding
-                response = ollama.embeddings(
-                    model=model_name,
-                    prompt=f["cleaned_content"]
-                )
-                results[f["path"]]["embeddings"][model_name] = response["embedding"]
-                
-            except ollama.ResponseError as e:
-                if e.status_code == 404:
-                    print(f"\n❌ ERROR CRÍTICO: El modelo '{model_name}' no existe en Ollama.")
-                    print("   Deteniendo este modelo. Instálalo con 'ollama pull'.")
-                    break # Saltamos al siguiente modelo
-                else:
-                    print(f"\n⚠️ Error Ollama en {f['filename']}: {e}")
-            except Exception as e:
-                 print(f"\n⚠️ Error desconocido en {f['filename']}: {e}")
-
-    # 4. Guardar
-    print(f"\n💾 Guardando resultados en {OUTPUT_FILE}...")
-    final_output = []
-    for path, data in results.items():
-        # Solo guardamos si tiene al menos un vector
-        if data["embeddings"]:
-            final_output.append({
-                "filename": data["filename"],
-                "label": data["label"],
-                "embeddings": data["embeddings"]
-            })
-
+    # Guardar
+    print(f"\n💾 Guardando {OUTPUT_FILE}...")
     with open(OUTPUT_FILE, "w", encoding="utf-8") as out:
-        json.dump(final_output, out)
-
-    print(f"✅ ¡Proceso terminado! Se guardaron {len(final_output)} archivos procesados.")
+        json.dump(final_data, out)
+    
+    print("✅ Proceso terminado. Listo para fase de Clasificación (k-NN).")
 
 if __name__ == "__main__":
     main()
